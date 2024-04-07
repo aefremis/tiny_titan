@@ -1,0 +1,174 @@
+---
+title: "Tiny titan"
+subtitle: " A local LLM deployment"
+author: "Andreas Effraimis"
+date: "April, 2024"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+---
+
+
+## Local deployment
+
+#### Download `llama.cpp`
+
+Go to git hub repository to get the inference mechanism: 
+
+`https://github.com/ggerganov/llama.cpp` 
+
+Hit `code` and copy paste `clone` link
+
+`https://github.com/ggerganov/llama.cpp.git`
+
+#### Clone and make executable
+
+* Select your local folder for the model to be placed
+* Clone git repo
+* Change directory into `llama.cpp`
+* Make it executable
+
+```bash
+cd /home/andreas/Documents/tiny_titan/
+git clone https://github.com/ggerganov/llama.cpp.git
+cd /home/andreas/Documents/tiny_titan/llama.cpp/
+make
+```
+
+#### Download `microsoft/phi-2`
+
+From huggingface we download the model and to avoid putting into the cache we pass the following parameters : 
+
+```bash
+pip install huggingface-hub
+huggingface-cli download microsoft/phi-2 --local-dir . --local-dir-use-symlinks False
+```
+
+#### Convert to `gguf`
+
+`llama.cpp` needs a `gguf` format.
+Execute the `convert-hf-to-gguf.py` script pointing to the directory our model is `../`
+
+```bash
+cd ../tiny_titan/llama.cpp/
+pip install -r requirements/requirements-convert-hf-to-gguf.txt 
+python3 convert-hf-to-gguf.py ../
+ls -lh ../ggml-model-f16.gguf
+```
+
+#### Run on device
+Point `llama.cpp` to local model
+
+```bash
+./main -m ../ggml-model-f16.gguf --color -i
+```
+
+
+## Sample application
+
+#### Python libraries 
+
+```bash
+pip install pypdf
+pip install python-dotenv
+pip install llama-index
+pip install llama-index-llms-huggingface
+pip install llama-index-embeddings-huggingface
+pip install gradio
+pip install einops
+pip install accelerate
+pip install transformers
+```
+
+#### Load packages
+
+```python
+from llama_index.core import VectorStoreIndex,SimpleDirectoryReader,ServiceContext
+from llama_index.llms.huggingface import HuggingFaceLLM
+from llama_index.core.prompts.prompts import SimpleInputPrompt
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from transformers import AutoConfig, AutoModel, AutoTokenizer
+import torch
+import gradio as gr
+```
+
+#### Point to files
+
+```python
+reader = SimpleDirectoryReader( 
+    input_files=["~/Documents/slm_flow/data/marketing_and_sales_IX.pdf"]
+)
+documents = reader.load_data()
+```
+
+#### Define answer style
+
+```python
+system_prompt = "You are a senior marketing executive. Your goal is to answer questions as accurately as possible based on the instructions and context provided."
+
+query_wrapper_prompt = SimpleInputPrompt("<|USER|>{query_str}<|ASSISTANT|>")
+```
+#### Point to local model 
+
+For tokenization and model inference point to local model
+
+```python
+model_path = "/home/andreas/Documents/tiny_titan"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoModel.from_pretrained(model_path)
+```
+
+#### Define `LLM` parameters
+
+```python
+llm = HuggingFaceLLM(
+    context_window=2048,
+    max_new_tokens=256,
+    generate_kwargs={"temperature": 0.2, "do_sample": True},
+    system_prompt=system_prompt,
+    query_wrapper_prompt=query_wrapper_prompt,
+    tokenizer_name='/home/andreas/Documents/tiny_titan',
+    model_name='/home/andreas/Documents/tiny_titan',
+    #device_map="cuda",
+    # uncomment this if using CUDA to reduce memory usage
+    model_kwargs={"torch_dtype": torch.bfloat16}
+)
+```
+
+#### Embedding model
+
+Loads `BAAI/bge-small-en-v1.5` from *huggingface*  
+and sets the `pytorch` distribution strategy
+
+```python
+embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+
+service_context = ServiceContext.from_defaults(
+    chunk_size=1024,
+    llm=llm,
+    embed_model=embed_model
+)
+```
+
+#### Vector Store Indexing
+
+Turn documents into numerical vectors  
+and define a *prediction* function.
+
+```python
+index = VectorStoreIndex.from_documents(documents,
+                                        service_context=service_context)
+
+query_engine = index.as_query_engine()
+
+def predict(input, history):
+  response = query_engine.query(input)
+  return str(response)
+```
+
+#### Web UI
+```python
+gr.ChatInterface(predict).launch(share=True)
+```
